@@ -1,6 +1,7 @@
 # Specifies intentionally untracked files to ignore when using Git
 # http://git-scm.com/docs/gitignore
 
+# --- System Files ---
 *~
 *.sw[mnpcod]
 .tmp
@@ -13,20 +14,38 @@ Thumbs.db
 UserInterfaceState.xcuserstate
 $RECYCLE.BIN/
 
+# --- Logs ---
 *.log
 log.txt
 npm-debug.log*
 
+# --- IDEs ---
 /.idea
+/.vscode/*
+!/.vscode/extensions.json
+
+# --- Ionic/Web Build Folders ---
 /.ionic
 /.sass-cache
 /.sourcemaps
 /.versions
-/.vscode/*
-!/.vscode/extensions.json
 /coverage
 /dist
 /node_modules
+/www
+
+# --- Capacitor Specifics ---
+# We keep the /android folder but ignore its build outputs
+/android/app/build
+/android/build
+/android/app/src/main/assets/public
+/android/app/src/main/res/xml/config.xml
+
+# --- Secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- Cordova (Legacy) ---
 /platforms
 /plugins
-/www
