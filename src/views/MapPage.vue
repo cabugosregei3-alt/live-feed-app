@@ -35,6 +35,7 @@
           <l-tile-layer 
             url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
             layer-type="base"
+            name="CartoDB"
           ></l-tile-layer>
 
           <l-tile-layer 
@@ -42,6 +43,7 @@
             :url="radarUrl"
             :opacity="0.6"
             layer-type="overlay"
+            name="Radar"
           ></l-tile-layer>
 
           <l-marker :lat-lng="myCenter">
@@ -68,7 +70,7 @@
             </l-icon>
             <l-tooltip :options="{ direction: 'top', offset: [0, -60], className: 'custom-tooltip' }" permanent>
               {{ friend.profiles?.username || 'Friend' }} 
-              <span v-if="friend.weather">({{ friend.weather.temperature }}°C)</span>
+              <span v-if="friend.weather">({{ Math.round(friend.weather.temperature) }}°C)</span>
             </l-tooltip>
           </l-marker>
         </l-map>
@@ -106,15 +108,14 @@ const showRadar = ref(false);
 const radarUrl = ref("");
 let watchId = null;
 
-// Maps Open-Meteo codes to Emojis
 const getWeatherEmoji = (code) => {
-  if (code <= 1) return '☀️'; // Clear
-  if (code <= 3) return '☁️'; // Partly Cloudy
-  if (code <= 48) return '🌫️'; // Fog
-  if (code <= 67) return '🌧️'; // Rain
-  if (code <= 77) return '❄️'; // Snow
-  if (code <= 82) return '🌦️'; // Showers
-  return '⛈️'; // Storm
+  if (code <= 1) return '☀️';
+  if (code <= 3) return '☁️';
+  if (code <= 48) return '🌫️';
+  if (code <= 67) return '🌧️';
+  if (code <= 77) return '❄️';
+  if (code <= 82) return '🌦️';
+  return '⛈️';
 };
 
 const fetchWeatherForFriend = async (lat, lng) => {
@@ -123,17 +124,21 @@ const fetchWeatherForFriend = async (lat, lng) => {
     const data = await res.json();
     return data.current_weather;
   } catch (e) {
+    console.error("Weather fetch failed", e);
     return null;
   }
 };
 
 const toggleRadar = async () => {
   if (!showRadar.value) {
-    // RainViewer API to get the latest tile timestamp
-    const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
-    const data = await res.json();
-    const latestTime = data.radar.past[data.radar.past.length - 1].time;
-    radarUrl.value = `https://tilecache.rainviewer.com/v2/radar/${latestTime}/256/{z}/{x}/{y}/2/1_1.png`;
+    try {
+      const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+      const data = await res.json();
+      const latestTime = data.radar.past[data.radar.past.length - 1].time;
+      radarUrl.value = `https://tilecache.rainviewer.com/v2/radar/${latestTime}/256/{z}/{x}/{y}/2/1_1.png`;
+    } catch (e) {
+      console.error("Radar fetch failed", e);
+    }
   }
   showRadar.value = !showRadar.value;
 };
@@ -160,7 +165,6 @@ const fetchFriendsLocations = async () => {
     .select(`lat, lng, user_id, profiles(username, avatar_url)`)
     .in('user_id', friendIds);
 
-  // Fetch weather for each friend concurrently
   const friendsWithWeather = await Promise.all((locationsData || []).map(async (f) => {
     const weather = await fetchWeatherForFriend(f.lat, f.lng);
     return { ...f, weather };
@@ -169,13 +173,16 @@ const fetchFriendsLocations = async () => {
   friends.value = friendsWithWeather;
 };
 
-const onMapReady = () => {
+// Fixed onMapReady to receive the leaflet instance properly
+const onMapReady = (leafletObject) => {
   nextTick(() => {
     setTimeout(() => {
-      if (mapInstance.value?.leafletObject) {
+      if (leafletObject) {
+        leafletObject.invalidateSize();
+      } else if (mapInstance.value?.leafletObject) {
         mapInstance.value.leafletObject.invalidateSize();
       }
-    }, 500);
+    }, 400);
   });
 };
 
@@ -187,6 +194,8 @@ const manualRefresh = async () => {
 
 const startTracking = async () => {
   const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
+
   watchId = navigator.geolocation.watchPosition(async (pos) => {
     const { latitude, longitude } = pos.coords;
     myCenter.value = [latitude, longitude];
@@ -196,12 +205,13 @@ const startTracking = async () => {
       lng: longitude, 
       updated_at: new Date()
     });
-  }, null, { enableHighAccuracy: true });
+  }, (err) => console.error("Geo error:", err), { enableHighAccuracy: true });
 };
 
 const centerOnMe = () => {
-  if (mapInstance.value?.leafletObject) {
-    mapInstance.value.leafletObject.flyTo(myCenter.value, 17, { duration: 1.5 });
+  const map = mapInstance.value?.leafletObject;
+  if (map) {
+    map.flyTo(myCenter.value, 17, { duration: 1.5 });
   }
 };
 
@@ -253,7 +263,7 @@ onUnmounted(() => {
   background: #2dd36f;
   border: 3px solid white;
   border-radius: 15px;
-  overflow: visible; /* Changed to visible for the weather badge */
+  overflow: visible;
   display: flex;
   align-items: center;
   justify-content: center;

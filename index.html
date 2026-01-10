@@ -2,23 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Ionic App</title>
+    <title>SVS</title>
 
-    <base href="/" />
+    <base href="./" />
 
     <meta name="color-scheme" content="light dark" />
     <meta
       name="viewport"
       content="viewport-fit=cover, width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
+    
+    <meta http-equiv="Content-Security-Policy" 
+          content="default-src 'self' data: gap: https://ssl.gstatic.com 'unsafe-eval'; 
+                   script-src 'self' 'unsafe-inline' 'unsafe-eval'; 
+                   style-src 'self' 'unsafe-inline'; 
+                   img-src 'self' data: blob: 
+                           https://*.tile.openstreetmap.org 
+                           https://*.tile.thunderforest.com 
+                           https://*.basemaps.cartocdn.com 
+                           https://tilecache.rainviewer.com
+                           https://*.supabase.co; 
+                   connect-src 'self' 
+                               https://*.supabase.co 
+                               wss://*.supabase.co 
+                               https://api.open-meteo.com 
+                               https://api.rainviewer.com;">
+
     <meta name="format-detection" content="telephone=no" />
     <meta name="msapplication-tap-highlight" content="no" />
 
     <link rel="shortcut icon" type="image/png" href="/favicon.png" />
 
-    <!-- add to homescreen for ios -->
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="Ionic App" />
+    <meta name="apple-mobile-web-app-title" content="SVS" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
   </head>
 
@@ -26,6 +42,4 @@
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
-
 </html>
-
