@@ -1,0 +1,7 @@
+{
+  "name": "my-supabase-app",
+  "integrations": {
+    "capacitor": {}
+  },
+  "type": "vue-vite"
+}
