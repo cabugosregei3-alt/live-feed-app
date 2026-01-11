@@ -23,8 +23,9 @@
       <div class="search-container" v-if="!isCalibrating">
         <ion-searchbar 
           v-model="searchQuery" 
-          placeholder="Search global spots..." 
+          placeholder="Search spots or notes..." 
           @ionInput="handleSearch"
+          @ionClear="searchResults = []"
           class="custom-searchbar">
         </ion-searchbar>
         
@@ -32,7 +33,7 @@
           <ion-item v-for="result in searchResults" :key="result.id" button @click="selectSearchResult(result)">
             <ion-label>
               <h2>{{ result.description }}</h2>
-              <p>Official Spot 🌟</p>
+              <p>{{ result.pinType === 'global' ? 'Official Spot 🌟' : 'Friend Note 📍' }}</p>
             </ion-label>
             <ion-icon :icon="navigateOutline" slot="end" color="primary"></ion-icon>
           </ion-item>
@@ -42,15 +43,23 @@
       <div class="map-overlay-stats" v-if="!isCalibrating">
         <div class="stat-badge">
           <div class="pulse-green"></div>
-          <span>{{ friends.length }} Friends Online | {{ customPins.length }} Friend Notes</span>
+          <div class="stat-text">
+            <span>{{ friends.length }} Online | {{ customPins.length }} Notes</span>
+            <small v-if="lastSyncTime" class="sync-time">Updated: {{ lastSyncTime }}</small>
+          </div>
         </div>
-        <div class="instruction-toast" v-if="!isRouting">Tap map to leave a note</div>
       </div>
 
       <div class="map-wrapper">
-        <l-map ref="mapInstance" v-model:zoom="zoom" :center="mapCenter" :use-global-leaflet="true"
-          :options="{ zoomControl: false, attributionControl: false, tap: false }" @ready="onMapReady" @click="handleMapClick">
-          
+        <l-map 
+          ref="mapInstance" 
+          v-model:zoom="zoom" 
+          :center="mapCenter" 
+          :use-global-leaflet="true"
+          :options="{ zoomControl: false, attributionControl: false, tap: false }" 
+          @ready="onMapReady" 
+          @click="handleMapClick"
+        >
           <l-tile-layer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" layer-type="base" name="CartoDB"></l-tile-layer>
 
           <l-marker v-if="isModalOpen && !editingPinId && pendingCoords" :lat-lng="[pendingCoords.lat, pendingCoords.lng]">
@@ -63,18 +72,12 @@
             <l-icon :icon-size="[40, 40]" :icon-anchor="[20, 40]">
               <div class="global-spot-pin">🌟</div>
             </l-icon>
-            <l-tooltip :options="{ direction: 'top', className: 'global-tooltip' }">
-              <strong>OFFICIAL</strong>: {{ spot.description }}
-            </l-tooltip>
           </l-marker>
 
           <l-marker v-for="pin in customPins" :key="'pin-'+pin.id" :lat-lng="[pin.lat, pin.lng]" @click="presentActionSheet(pin, 'user')">
             <l-icon :icon-size="[35, 35]" :icon-anchor="[17, 35]">
               <div class="custom-note-pin">📍</div>
             </l-icon>
-            <l-tooltip :options="{ direction: 'top', className: 'note-tooltip' }">
-              <strong>{{ pin.profiles?.username || 'User' }}</strong>: {{ pin.description }}
-            </l-tooltip>
           </l-marker>
 
           <l-marker :lat-lng="myCenter" class="smooth-marker">
@@ -123,14 +126,8 @@
               <ion-label>Post as Global Official Spot?</ion-label>
               <ion-toggle v-model="isGlobalMode" color="warning"></ion-toggle>
             </ion-item>
-
             <ion-item lines="none" class="input-item">
-              <ion-textarea 
-                v-model="newPinDesc" 
-                :placeholder="isGlobalMode ? 'Describe this official spot...' : 'Leave a note for your friends...'" 
-                :rows="4" 
-                auto-grow>
-              </ion-textarea>
+              <ion-textarea v-model="newPinDesc" :placeholder="isGlobalMode ? 'Describe spot...' : 'Leave a note...'" :rows="4" auto-grow></ion-textarea>
             </ion-item>
             <ion-button expand="block" @click="handleSavePin" class="confirm-btn">
               {{ editingPinId ? 'Save Changes' : (isGlobalMode ? 'Drop Global Spot 🌟' : 'Drop Friend Note 📍') }}
@@ -141,7 +138,7 @@
 
       <ion-action-sheet 
         :is-open="isActionSheetOpen" 
-        :header="selectedPin?.pinType === 'global' ? '🌟 Official Location' : (selectedPin?.profiles?.username + '\'s Note 📍')"
+        :header="selectedPin?.pinType === 'global' ? '🌟 Official' : (selectedPin?.profiles?.username + '\'s Note')"
         :sub-header="selectedPin?.description" 
         :buttons="actionSheetButtons"
         @didDismiss="isActionSheetOpen = false">
@@ -161,7 +158,7 @@ import { Geolocation } from '@capacitor/geolocation';
 import {
   IonPage, IonContent, IonHeader, IonToolbar, IonTitle,
   IonIcon, IonButtons, IonButton, IonModal, IonTextarea, IonItem,
-  IonActionSheet, IonSpinner, IonLabel, IonToggle
+  IonActionSheet, IonSpinner, IonLabel, IonToggle, IonSearchbar, IonList
 } from '@ionic/vue';
 import {
   locateOutline, refreshOutline, trashOutline, createOutline, navigateOutline
@@ -169,6 +166,7 @@ import {
 
 const ROOT_ID = 'f0221dc3-cd62-47df-9752-c830594e0144'; 
 
+// --- STATE ---
 const zoom = ref(15);
 const myCenter = ref([0, 0]);
 const mapCenter = ref([0, 0]);
@@ -178,11 +176,9 @@ const friends = ref([]);
 const customPins = ref([]);
 const globalSpots = ref([]);
 const isRefreshing = ref(false);
+const lastSyncTime = ref("");
 const mapInstance = ref(null);
 const isRouting = ref(false);
-let routingControl = null;
-let watchId = null;
-
 const searchQuery = ref("");
 const searchResults = ref([]);
 const isModalOpen = ref(false);
@@ -193,305 +189,169 @@ const isGlobalMode = ref(false);
 const newPinDesc = ref("");
 const pendingCoords = ref(null);
 
-// --- SEARCH LOGIC ---
+let routingControl = null;
+let watchId = null;
+let broadcastChannel = null;
+let lastSavedPos = { lat: 0, lng: 0 };
+
+// --- SEARCH LOGIC FIXED ---
 const handleSearch = (ev) => {
-  const query = ev.target.value.toLowerCase();
-  if (!query) { searchResults.value = []; return; }
-  searchResults.value = globalSpots.value.filter(spot => 
-    spot.description.toLowerCase().includes(query)
-  ).slice(0, 5); 
+  const query = ev.target.value?.toLowerCase().trim();
+  if (!query) {
+    searchResults.value = [];
+    return;
+  }
+
+  // Search through Global Official Spots
+  const globalMatches = globalSpots.value
+    .filter(s => s.description.toLowerCase().includes(query))
+    .map(s => ({ ...s, pinType: 'global' }));
+
+  // Search through User/Friend Notes
+  const pinMatches = customPins.value
+    .filter(p => p.description.toLowerCase().includes(query))
+    .map(p => ({ ...p, pinType: 'user' }));
+
+  searchResults.value = [...globalMatches, ...pinMatches].slice(0, 6);
 };
 
-const selectSearchResult = (spot) => {
-  const map = mapInstance.value?.leafletObject;
-  if (map) {
-    map.flyTo([spot.lat, spot.lng], 18, { duration: 1.5 });
-    presentActionSheet(spot, 'global');
-  }
+const selectSearchResult = (item) => {
+  if (!mapInstance.value) return;
+  
+  const map = mapInstance.value.leafletObject;
+  map.flyTo([item.lat, item.lng], 18, { animate: true, duration: 1.5 });
+  
+  presentActionSheet(item, item.pinType);
+  
+  // Clear search UI
   searchQuery.value = "";
   searchResults.value = [];
 };
 
-// --- LOCATION TRACKING (SMOOTH MOVEMENT ENABLED) ---
-const startTracking = async () => {
-  try {
-    const permissions = await Geolocation.checkPermissions();
-    if (permissions.location !== 'granted') await Geolocation.requestPermissions();
-    
-    // Initial Position
+// --- DATA FETCHING ---
+const fetchAllData = async () => {
+  if (!currentUserId.value) return;
+
+  const { data: friendships } = await supabase.from('friendships').select('sender_id, receiver_id').eq('status', 'accepted').or(`sender_id.eq.${currentUserId.value},receiver_id.eq.${currentUserId.value}`);
+  const ids = friendships?.map(f => f.sender_id === currentUserId.value ? f.receiver_id : f.sender_id) || [];
+
+  const [locs, pins, globals] = await Promise.all([
+    ids.length ? supabase.from('locations').select(`lat, lng, user_id, profiles(username, avatar_url)`).in('user_id', ids) : Promise.resolve({ data: [] }),
+    supabase.from('map_pins').select('*, profiles(username)').in('user_id', [...ids, currentUserId.value]),
+    supabase.from('global_spots').select('*')
+  ]);
+
+  if (locs.data) friends.value = locs.data;
+  if (pins.data) customPins.value = pins.data;
+  if (globals.data) globalSpots.value = globals.data;
+  
+  updateSyncTimestamp();
+};
+
+// --- OTHER HANDLERS ---
+const manualRefresh = async () => {
+  isRefreshing.value = true;
+  clearRoute();
+  await fetchAllData();
+  setTimeout(() => isRefreshing.value = false, 800);
+};
+
+const handleMapClick = (e) => {
+  if (isRouting.value || searchQuery.value) return;
+  editingPinId.value = null; isGlobalMode.value = false;
+  pendingCoords.value = e.latlng; newPinDesc.value = ""; isModalOpen.value = true;
+};
+
+const handleSavePin = async () => {
+  if (!newPinDesc.value.trim()) return;
+  const table = isGlobalMode.value ? 'global_spots' : 'map_pins';
+  if (editingPinId.value) {
+    await supabase.from(table).update({ description: newPinDesc.value }).eq('id', editingPinId.value);
+  } else {
+    const payload = isGlobalMode.value 
+      ? { title: 'Spot', description: newPinDesc.value, lat: pendingCoords.value.lat, lng: pendingCoords.value.lng }
+      : { user_id: currentUserId.value, description: newPinDesc.value, lat: pendingCoords.value.lat, lng: pendingCoords.value.lng };
+    await supabase.from(table).insert(payload);
+  }
+  fetchAllData();
+  closeModal();
+};
+
+const centerOnMe = () => mapInstance.value?.leafletObject.flyTo(myCenter.value, 17);
+const presentActionSheet = (pin, type) => { selectedPin.value = { ...pin, pinType: type }; isActionSheetOpen.value = true; };
+const closeModal = () => { isModalOpen.value = false; pendingCoords.value = null; };
+const onMapReady = (o) => nextTick(() => setTimeout(() => o?.invalidateSize(), 400));
+const clearRoute = () => { if (routingControl) mapInstance.value?.leafletObject.removeControl(routingControl); routingControl = null; isRouting.value = false; };
+const updateSyncTimestamp = () => { lastSyncTime.value = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); };
+
+const actionSheetButtons = computed(() => {
+  const btns = [];
+  if (selectedPin.value?.user_id === currentUserId.value || currentUserId.value === ROOT_ID) {
+    btns.push({ text: 'Edit', icon: createOutline, handler: () => { editingPinId.value = selectedPin.value.id; newPinDesc.value = selectedPin.value.description; isModalOpen.value = true; } });
+    btns.push({ text: 'Delete', role: 'destructive', icon: trashOutline, handler: async () => {
+      await supabase.from(selectedPin.value.pinType === 'global' ? 'global_spots' : 'map_pins').delete().eq('id', selectedPin.value.id);
+      fetchAllData();
+    }});
+  }
+  btns.push({ text: 'Cancel', role: 'cancel' });
+  return btns;
+});
+
+onMounted(async () => {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user) {
+    currentUserId.value = user.id;
+    await fetchAllData();
     const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true });
     myCenter.value = [pos.coords.latitude, pos.coords.longitude];
     mapCenter.value = [pos.coords.latitude, pos.coords.longitude];
     isCalibrating.value = false;
-
-    // Real-time Smooth Watch (Updates every 1s)
-    watchId = await Geolocation.watchPosition(
-      { enableHighAccuracy: true, timeout: 1000, maximumAge: 0 }, 
-      (position, err) => {
-        if (err || !position) return;
-        
-        const lat = position.coords.latitude;
-        const lng = position.coords.longitude;
-        
-        // Update marker (CSS transition handles smoothness)
-        myCenter.value = [lat, lng];
-
-        // Sync with Supabase
-        if (currentUserId.value) {
-          supabase.from('locations').upsert({ 
-            user_id: currentUserId.value, 
-            lat, 
-            lng, 
-            updated_at: new Date() 
-          }).then();
-        }
-      }
-    );
-  } catch (e) {
-    isCalibrating.value = false;
   }
-};
-
-// --- ROUTING ---
-const startRouting = (pin) => {
-  const map = mapInstance.value?.leafletObject;
-  if (!map || !myCenter.value) return;
-  selectedPin.value = pin;
-  isRouting.value = true;
-  if (routingControl) map.removeControl(routingControl);
-  routingControl = L.Routing.control({
-    waypoints: [L.latLng(myCenter.value[0], myCenter.value[1]), L.latLng(pin.lat, pin.lng)],
-    lineOptions: { styles: [{ color: '#1a73e8', opacity: 0.15, weight: 9 }, { color: '#2dd36f', opacity: 0.8, weight: 6 }] },
-    router: L.Routing.osrmv1({ serviceUrl: `https://router.project-osrm.org/route/v1` }),
-    show: false, addWaypoints: false, draggableWaypoints: false, fitSelectedRoutes: true,
-    createMarker: () => null
-  }).addTo(map);
-};
-
-const recalculateRoute = () => {
-  if (!routingControl || !selectedPin.value) return;
-  routingControl.setWaypoints([L.latLng(myCenter.value[0], myCenter.value[1]), L.latLng(selectedPin.value.lat, selectedPin.value.lng)]);
-};
-
-const clearRoute = () => {
-  const map = mapInstance.value?.leafletObject;
-  if (map && routingControl) { map.removeControl(routingControl); routingControl = null; }
-  isRouting.value = false;
-};
-
-// --- DATA FETCHING ---
-const getFriendIds = async (userId) => {
-  const { data } = await supabase
-    .from('friendships')
-    .select('sender_id, receiver_id')
-    .eq('status', 'accepted')
-    .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
-  return data?.map(f => f.sender_id === userId ? f.receiver_id : f.sender_id) || [];
-};
-
-const fetchGlobalSpots = async () => {
-  const { data } = await supabase.from('global_spots').select('*');
-  if (data) globalSpots.value = data;
-};
-
-const fetchCustomPins = async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
-  const friendIds = await getFriendIds(user.id);
-  const allowedIds = [...friendIds, user.id];
-  const { data: pinsData } = await supabase
-    .from('map_pins')
-    .select('*, profiles(username)')
-    .in('user_id', allowedIds);
-  if (pinsData) customPins.value = pinsData;
-};
-
-const fetchFriendsLocations = async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return;
-  currentUserId.value = user.id;
-  const friendIds = await getFriendIds(user.id);
-  if (friendIds.length === 0) { friends.value = []; return; }
-  const { data: locationsData } = await supabase
-    .from('locations').select(`lat, lng, user_id, profiles(username, avatar_url)`).in('user_id', friendIds);
-  if (locationsData) friends.value = locationsData;
-};
-
-// --- ACTION SHEET & HANDLERS ---
-const handleMapClick = (e) => {
-  if (isRouting.value || searchQuery.value) return;
-  editingPinId.value = null;
-  isGlobalMode.value = false;
-  pendingCoords.value = e.latlng;
-  newPinDesc.value = "";
-  isModalOpen.value = true;
-};
-
-const handleSavePin = async () => {
-  if (!newPinDesc.value.trim() || !currentUserId.value) return;
-  const table = isGlobalMode.value ? 'global_spots' : 'map_pins';
-  
-  if (editingPinId.value) {
-    await supabase.from(table).update({ description: newPinDesc.value.trim() }).eq('id', editingPinId.value);
-  } else {
-    const payload = isGlobalMode.value 
-      ? { title: 'Global Spot', description: newPinDesc.value.trim(), lat: pendingCoords.value.lat, lng: pendingCoords.value.lng }
-      : { user_id: currentUserId.value, lat: pendingCoords.value.lat, lng: pendingCoords.value.lng, description: newPinDesc.value.trim() };
-    await supabase.from(table).insert(payload);
-  }
-  isGlobalMode.value ? fetchGlobalSpots() : fetchCustomPins();
-  closeModal();
-};
-
-const deletePin = async (id, type) => {
-  const table = type === 'global' ? 'global_spots' : 'map_pins';
-  await supabase.from(table).delete().eq('id', id);
-  type === 'global' ? fetchGlobalSpots() : fetchCustomPins();
-};
-
-const presentActionSheet = (pin, type) => {
-  selectedPin.value = { ...pin, pinType: type };
-  isActionSheetOpen.value = true;
-};
-
-const actionSheetButtons = computed(() => {
-  const buttons = [{ text: 'Show Path', icon: navigateOutline, handler: () => startRouting(selectedPin.value) }];
-  const isOwner = selectedPin.value?.user_id === currentUserId.value;
-  const isAdmin = currentUserId.value === ROOT_ID;
-
-  if (isOwner || isAdmin) {
-    buttons.push({
-      text: 'Edit', icon: createOutline, 
-      handler: () => {
-        editingPinId.value = selectedPin.value.id;
-        newPinDesc.value = selectedPin.value.description;
-        isGlobalMode.value = selectedPin.value.pinType === 'global';
-        isModalOpen.value = true;
-      }
-    }, {
-      text: 'Delete', role: 'destructive', icon: trashOutline, 
-      handler: () => deletePin(selectedPin.value.id, selectedPin.value.pinType)
-    });
-  }
-  buttons.push({ text: 'Cancel', role: 'cancel' });
-  return buttons;
-});
-
-const closeModal = () => { isModalOpen.value = false; editingPinId.value = null; pendingCoords.value = null; };
-const onMapReady = (obj) => { nextTick(() => setTimeout(() => obj?.invalidateSize(), 400)); };
-const manualRefresh = async () => {
-  isRefreshing.value = true;
-  await Promise.all([fetchFriendsLocations(), fetchCustomPins(), fetchGlobalSpots()]);
-  setTimeout(() => isRefreshing.value = false, 600);
-};
-
-const centerOnMe = () => {
-  const map = mapInstance.value?.leafletObject;
-  if (map) map.flyTo(myCenter.value, 17, { duration: 1.2 });
-};
-
-onMounted(async () => {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (user) currentUserId.value = user.id;
-  await Promise.all([fetchFriendsLocations(), fetchCustomPins(), fetchGlobalSpots()]);
-  startTracking();
-  supabase.channel('map-sync')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'locations' }, fetchFriendsLocations)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'map_pins' }, fetchCustomPins)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'global_spots' }, fetchGlobalSpots)
-    .subscribe();
-});
-
-onUnmounted(async () => { 
-  if (watchId) await Geolocation.clearWatch({ id: watchId }); 
-  supabase.removeAllChannels(); 
 });
 </script>
 
 <style scoped>
-/* LIGHT MODE ENFORCEMENT */
-.map-content { --background: #ffffff !important; background: #ffffff !important; height: 100%; }
-.map-wrapper { height: 100%; width: 100%; position: relative; background: #ffffff !important; }
+.map-content { --background: #fff !important; height: 100%; }
+.map-wrapper { height: 100%; width: 100%; position: relative; }
+:deep(.leaflet-container) { height: 100% !important; background: #f8f9fa !important; }
 
-/* LEAFLET CONTAINER LOCK */
-:deep(.leaflet-container) { 
-  height: 100% !important; 
-  width: 100% !important; 
-  background: #f8f9fa !important;
-  filter: none !important; /* Prevents "forced" dark mode on some devices */
-}
+/* SEARCH UI - DESIGN PRESERVED BUT FIXED Z-INDEX */
+.search-container { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 92%; z-index: 10000; }
+.custom-searchbar { --border-radius: 16px; --box-shadow: 0 4px 12px rgba(0,0,0,0.15); --background: #fff !important; }
+.search-results-list { background: white; border-radius: 12px; margin-top: 5px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); max-height: 250px; overflow-y: auto; }
 
-/* SMOOTH MARKER MOVEMENT */
-:deep(.leaflet-marker-icon) {
-  transition: transform 0.4s linear !important; /* This creates the "sliding" effect */
-}
+.map-overlay-stats { position: absolute; top: 75px; left: 15px; z-index: 1000; }
+.stat-badge { background: white; padding: 8px 16px; border-radius: 20px; display: flex; align-items: center; gap: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.stat-text { display: flex; flex-direction: column; line-height: 1.2; }
+.stat-text span { font-weight: bold; font-size: 0.8rem; color: #333; }
+.sync-time { font-size: 0.65rem; color: #666; }
 
-/* SEARCH UI */
-.search-container {
-  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-  width: 92%; max-width: 500px; z-index: 1001;
-}
-.custom-searchbar { 
-  --border-radius: 16px; 
-  --box-shadow: 0 4px 12px rgba(0,0,0,0.12); 
-  padding: 0;
-  --background: #ffffff !important;
-  --color: #000000 !important;
-}
-.search-results-list {
-  background: white !important; border-radius: 12px; margin-top: 5px; max-height: 200px;
-  overflow-y: auto; box-shadow: 0 8px 16px rgba(0,0,0,0.15);
-}
+/* Pulse Indicator */
+.pulse-green { width: 8px; height: 8px; background: #2dd36f; border-radius: 50%; box-shadow: 0 0 0 rgba(45, 211, 111, 0.4); animation: statusPulse 2s infinite; }
+@keyframes statusPulse { 0% { box-shadow: 0 0 0 0 rgba(45, 211, 111, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(45, 211, 111, 0); } 100% { box-shadow: 0 0 0 0 rgba(45, 211, 111, 0); } }
 
-/* OVERLAYS */
-.calibration-overlay {
-  position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: white; z-index: 2000;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px;
-}
-.map-overlay-stats { position: absolute; top: 75px; left: 15px; z-index: 1000; display: flex; flex-direction: column; gap: 5px; }
-.stat-badge { 
-  background: white; padding: 8px 16px; border-radius: 20px; display: flex; align-items: center; gap: 10px; 
-  box-shadow: 0 4px 10px rgba(0,0,0,0.1); font-weight: 700; font-size: 0.8rem; color: #333;
-}
-
-/* PINS & MARKERS */
-.custom-note-pin { font-size: 30px; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3)); }
-.global-spot-pin { font-size: 36px; filter: drop-shadow(0 0 8px rgba(255,193,7,0.6)); animation: float 3s infinite ease-in-out; }
-@keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
-
-/* MY LOCATION PULSE */
+/* Markers */
 .my-location-marker { position: relative; display: flex; align-items: center; justify-content: center; }
 .core-dot { width: 14px; height: 14px; background: #2dd36f; border: 3px solid white; border-radius: 50%; z-index: 2; }
-.pulse-ring { position: absolute; width: 35px; height: 35px; background: rgba(45,211,111,0.3); border-radius: 50%; animation: pulse-ring 2s infinite; }
+.pulse-ring { position: absolute; width: 35px; height: 35px; background: rgba(45,211,111,0.3); border-radius: 50%; animation: pulse 2s infinite; }
 
-/* FRIEND AVATAR PINS */
 .friend-marker-pin { display: flex; flex-direction: column; align-items: center; }
-.avatar-box { 
-  width: 45px; height: 45px; background: #2dd36f; border: 3px solid white; 
-  border-radius: 15px; display: flex; align-items: center; justify-content: center; 
-  font-weight: 800; color: white; position: relative; overflow: hidden;
-}
-.map-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; }
+.avatar-box { width: 45px; height: 45px; background: #2dd36f; border: 3px solid white; border-radius: 15px; overflow: hidden; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; }
+.map-avatar-img { width: 100%; height: 100%; object-fit: cover; }
 .pin-beak { width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 10px solid white; margin-top: -2px; }
 
-/* CONTROLS */
+/* Controls */
 .map-controls { position: absolute; bottom: 30px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 12px; }
-.control-btn { 
-  width: 50px; height: 50px; background: white; border: none; border-radius: 16px; 
-  display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2dd36f; 
-  box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
-}
-.recalc-btn { flex-direction: column; gap: 2px; background: #2dd36f !important; color: white !important; font-size: 18px; }
+.control-btn { width: 50px; height: 50px; background: white; border: none; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #2dd36f; box-shadow: 0 4px 15px rgba(0,0,0,0.15); }
 
-@keyframes pulse-ring { 0% { transform: scale(0.5); opacity: 1; } 100% { transform: scale(1.5); opacity: 0; } }
+@keyframes pulse { 0% { transform: scale(0.5); opacity: 1; } 100% { transform: scale(1.5); opacity: 0; } }
 .spinning { animation: rotate 0.8s linear infinite; }
 @keyframes rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 </style>
-
 <style>
-/* Global Leaflet Overrides (Must be unscoped) */
+/* Global Leaflet Overrides */
 .leaflet-div-icon { background: transparent !important; border: none !important; }
 .leaflet-routing-container { display: none !important; }
-/* Force Tooltips to be light */
-.leaflet-tooltip { background: white !important; color: black !important; border: none !important; box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important; font-weight: bold; }
+.leaflet-tooltip { background: white !important; color: #000 !important; border: none !important; box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important; font-weight: bold; padding: 6px 10px; border-radius: 8px; }
+.ghost-pin { opacity: 0.6; filter: grayscale(1); }
 </style>
