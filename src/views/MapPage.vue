@@ -49,7 +49,7 @@
 
       <div class="map-wrapper">
         <l-map ref="mapInstance" v-model:zoom="zoom" :center="mapCenter" :use-global-leaflet="true"
-          :options="{ zoomControl: false, attributionControl: false }" @ready="onMapReady" @click="handleMapClick">
+          :options="{ zoomControl: false, attributionControl: false, tap: false }" @ready="onMapReady" @click="handleMapClick">
           
           <l-tile-layer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" layer-type="base" name="CartoDB"></l-tile-layer>
 
@@ -77,8 +77,8 @@
             </l-tooltip>
           </l-marker>
 
-          <l-marker :lat-lng="myCenter">
-            <l-icon :icon-size="[24, 24]">
+          <l-marker :lat-lng="myCenter" class="smooth-marker">
+            <l-icon :icon-size="[24, 24]" :icon-anchor="[12, 12]">
               <div class="my-location-marker">
                 <div class="pulse-ring"></div>
                 <div class="core-dot"></div>
@@ -86,13 +86,10 @@
             </l-icon>
           </l-marker>
 
-          <l-marker v-for="friend in friends" :key="friend.user_id" :lat-lng="[friend.lat, friend.lng]">
+          <l-marker v-for="friend in friends" :key="friend.user_id" :lat-lng="[friend.lat, friend.lng]" class="smooth-marker">
             <l-icon :icon-size="[50, 60]" :icon-anchor="[25, 60]">
               <div class="friend-marker-pin">
                 <div class="avatar-box">
-                  <div class="weather-mini-badge" v-if="friend.weather">
-                    {{ getWeatherEmoji(friend.weather.weathercode) }}
-                  </div>
                   <img v-if="friend.profiles?.avatar_url" :src="friend.profiles.avatar_url" class="map-avatar-img" />
                   <span v-else>{{ friend.profiles?.username?.charAt(0).toUpperCase() || '?' }}</span>
                 </div>
@@ -164,8 +161,7 @@ import { Geolocation } from '@capacitor/geolocation';
 import {
   IonPage, IonContent, IonHeader, IonToolbar, IonTitle,
   IonIcon, IonButtons, IonButton, IonModal, IonTextarea, IonItem,
-  IonActionSheet, IonSpinner, IonLabel, IonToggle, toastController,
-  IonSearchbar, IonList
+  IonActionSheet, IonSpinner, IonLabel, IonToggle
 } from '@ionic/vue';
 import {
   locateOutline, refreshOutline, trashOutline, createOutline, navigateOutline
@@ -197,21 +193,6 @@ const isGlobalMode = ref(false);
 const newPinDesc = ref("");
 const pendingCoords = ref(null);
 
-const showToast = async (msg, color = 'dark') => {
-  const t = await toastController.create({ message: msg, duration: 2000, color });
-  t.present();
-};
-
-const getWeatherEmoji = (code) => {
-  if (code <= 1) return '☀️';
-  if (code <= 3) return '☁️';
-  if (code <= 48) return '🌫️';
-  if (code <= 67) return '🌧️';
-  if (code <= 77) return '❄️';
-  if (code <= 82) return '🌦️';
-  return '⛈️';
-};
-
 // --- SEARCH LOGIC ---
 const handleSearch = (ev) => {
   const query = ev.target.value.toLowerCase();
@@ -231,27 +212,41 @@ const selectSearchResult = (spot) => {
   searchResults.value = [];
 };
 
-// --- LOCATION TRACKING ---
+// --- LOCATION TRACKING (SMOOTH MOVEMENT ENABLED) ---
 const startTracking = async () => {
   try {
     const permissions = await Geolocation.checkPermissions();
     if (permissions.location !== 'granted') await Geolocation.requestPermissions();
-    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true, timeout: 10000 });
+    
+    // Initial Position
+    const pos = await Geolocation.getCurrentPosition({ enableHighAccuracy: true });
     myCenter.value = [pos.coords.latitude, pos.coords.longitude];
     mapCenter.value = [pos.coords.latitude, pos.coords.longitude];
     isCalibrating.value = false;
 
-    watchId = await Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }, (position, err) => {
-      if (err) return;
-      if (position) {
+    // Real-time Smooth Watch (Updates every 1s)
+    watchId = await Geolocation.watchPosition(
+      { enableHighAccuracy: true, timeout: 1000, maximumAge: 0 }, 
+      (position, err) => {
+        if (err || !position) return;
+        
         const lat = position.coords.latitude;
         const lng = position.coords.longitude;
+        
+        // Update marker (CSS transition handles smoothness)
         myCenter.value = [lat, lng];
+
+        // Sync with Supabase
         if (currentUserId.value) {
-          supabase.from('locations').upsert({ user_id: currentUserId.value, lat, lng, updated_at: new Date() }).then();
+          supabase.from('locations').upsert({ 
+            user_id: currentUserId.value, 
+            lat, 
+            lng, 
+            updated_at: new Date() 
+          }).then();
         }
       }
-    });
+    );
   } catch (e) {
     isCalibrating.value = false;
   }
@@ -285,70 +280,44 @@ const clearRoute = () => {
 };
 
 // --- DATA FETCHING ---
+const getFriendIds = async (userId) => {
+  const { data } = await supabase
+    .from('friendships')
+    .select('sender_id, receiver_id')
+    .eq('status', 'accepted')
+    .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+  return data?.map(f => f.sender_id === userId ? f.receiver_id : f.sender_id) || [];
+};
 
-// 1. Global Spots: Everyone sees these
 const fetchGlobalSpots = async () => {
   const { data } = await supabase.from('global_spots').select('*');
   if (data) globalSpots.value = data;
 };
 
-// 2. Personal Pins: FRIENDS ONLY Logic
 const fetchCustomPins = async () => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return;
-
-  // Step A: Get accepted friendships
-  const { data: friendshipData } = await supabase
-    .from('friendships')
-    .select('sender_id, receiver_id')
-    .eq('status', 'accepted')
-    .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`);
-
-  // Step B: Collect Friend IDs
-  const friendIds = friendshipData?.map(f => 
-    f.sender_id === user.id ? f.receiver_id : f.sender_id
-  ) || [];
-
-  // Step C: Allowed IDs = Friends + Yourself
+  const friendIds = await getFriendIds(user.id);
   const allowedIds = [...friendIds, user.id];
-
-  // Step D: Query only pins from those IDs
   const { data: pinsData } = await supabase
     .from('map_pins')
     .select('*, profiles(username)')
     .in('user_id', allowedIds);
-
   if (pinsData) customPins.value = pinsData;
 };
 
-// 3. Live Location: Friends Only Logic
 const fetchFriendsLocations = async () => {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return;
   currentUserId.value = user.id;
-
-  const { data: friendshipData } = await supabase
-    .from('friendships').select('sender_id, receiver_id').eq('status', 'accepted')
-    .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`);
-
-  const friendIds = friendshipData?.map(f => f.sender_id === user.id ? f.receiver_id : f.sender_id) || [];
+  const friendIds = await getFriendIds(user.id);
   if (friendIds.length === 0) { friends.value = []; return; }
-
   const { data: locationsData } = await supabase
     .from('locations').select(`lat, lng, user_id, profiles(username, avatar_url)`).in('user_id', friendIds);
-
-  if (locationsData) {
-    friends.value = await Promise.all(locationsData.map(async (f) => {
-      try {
-        const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${f.lat}&longitude=${f.lng}&current_weather=true`);
-        const d = await res.json();
-        return { ...f, weather: d.current_weather };
-      } catch { return f; }
-    }));
-  }
+  if (locationsData) friends.value = locationsData;
 };
 
-// --- HANDLERS ---
+// --- ACTION SHEET & HANDLERS ---
 const handleMapClick = (e) => {
   if (isRouting.value || searchQuery.value) return;
   editingPinId.value = null;
@@ -409,9 +378,7 @@ const actionSheetButtons = computed(() => {
 });
 
 const closeModal = () => { isModalOpen.value = false; editingPinId.value = null; pendingCoords.value = null; };
-
 const onMapReady = (obj) => { nextTick(() => setTimeout(() => obj?.invalidateSize(), 400)); };
-
 const manualRefresh = async () => {
   isRefreshing.value = true;
   await Promise.all([fetchFriendsLocations(), fetchCustomPins(), fetchGlobalSpots()]);
@@ -442,18 +409,37 @@ onUnmounted(async () => {
 </script>
 
 <style scoped>
-.map-content { --background: #ffffff; height: 100%; }
-.map-wrapper { height: 100%; width: 100%; position: relative; }
-:deep(.leaflet-container) { height: 100% !important; width: 100% !important; background: #f8f9fa; }
+/* LIGHT MODE ENFORCEMENT */
+.map-content { --background: #ffffff !important; background: #ffffff !important; height: 100%; }
+.map-wrapper { height: 100%; width: 100%; position: relative; background: #ffffff !important; }
+
+/* LEAFLET CONTAINER LOCK */
+:deep(.leaflet-container) { 
+  height: 100% !important; 
+  width: 100% !important; 
+  background: #f8f9fa !important;
+  filter: none !important; /* Prevents "forced" dark mode on some devices */
+}
+
+/* SMOOTH MARKER MOVEMENT */
+:deep(.leaflet-marker-icon) {
+  transition: transform 0.4s linear !important; /* This creates the "sliding" effect */
+}
 
 /* SEARCH UI */
 .search-container {
   position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
   width: 92%; max-width: 500px; z-index: 1001;
 }
-.custom-searchbar { --border-radius: 16px; --box-shadow: 0 4px 12px rgba(0,0,0,0.12); padding: 0; }
+.custom-searchbar { 
+  --border-radius: 16px; 
+  --box-shadow: 0 4px 12px rgba(0,0,0,0.12); 
+  padding: 0;
+  --background: #ffffff !important;
+  --color: #000000 !important;
+}
 .search-results-list {
-  background: white; border-radius: 12px; margin-top: 5px; max-height: 200px;
+  background: white !important; border-radius: 12px; margin-top: 5px; max-height: 200px;
   overflow-y: auto; box-shadow: 0 8px 16px rgba(0,0,0,0.15);
 }
 
@@ -465,11 +451,7 @@ onUnmounted(async () => {
 .map-overlay-stats { position: absolute; top: 75px; left: 15px; z-index: 1000; display: flex; flex-direction: column; gap: 5px; }
 .stat-badge { 
   background: white; padding: 8px 16px; border-radius: 20px; display: flex; align-items: center; gap: 10px; 
-  box-shadow: 0 4px 10px rgba(0,0,0,0.1); font-weight: 700; font-size: 0.8rem; 
-}
-.instruction-toast {
-  background: rgba(255,255,255,0.9); padding: 5px 12px; border-radius: 10px;
-  font-size: 0.75rem; width: fit-content; box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.1); font-weight: 700; font-size: 0.8rem; color: #333;
 }
 
 /* PINS & MARKERS */
@@ -477,19 +459,20 @@ onUnmounted(async () => {
 .global-spot-pin { font-size: 36px; filter: drop-shadow(0 0 8px rgba(255,193,7,0.6)); animation: float 3s infinite ease-in-out; }
 @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
 
+/* MY LOCATION PULSE */
 .my-location-marker { position: relative; display: flex; align-items: center; justify-content: center; }
 .core-dot { width: 14px; height: 14px; background: #2dd36f; border: 3px solid white; border-radius: 50%; z-index: 2; }
 .pulse-ring { position: absolute; width: 35px; height: 35px; background: rgba(45,211,111,0.3); border-radius: 50%; animation: pulse-ring 2s infinite; }
 
+/* FRIEND AVATAR PINS */
 .friend-marker-pin { display: flex; flex-direction: column; align-items: center; }
 .avatar-box { 
   width: 45px; height: 45px; background: #2dd36f; border: 3px solid white; 
   border-radius: 15px; display: flex; align-items: center; justify-content: center; 
-  font-weight: 800; color: white; position: relative; 
+  font-weight: 800; color: white; position: relative; overflow: hidden;
 }
 .map-avatar-img { width: 100%; height: 100%; object-fit: cover; border-radius: 12px; }
 .pin-beak { width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-top: 10px solid white; margin-top: -2px; }
-.weather-mini-badge { position: absolute; top: -10px; right: -10px; font-size: 16px; z-index: 10; }
 
 /* CONTROLS */
 .map-controls { position: absolute; bottom: 30px; right: 20px; z-index: 1000; display: flex; flex-direction: column; gap: 12px; }
@@ -499,7 +482,6 @@ onUnmounted(async () => {
   box-shadow: 0 4px 15px rgba(0,0,0,0.15); 
 }
 .recalc-btn { flex-direction: column; gap: 2px; background: #2dd36f !important; color: white !important; font-size: 18px; }
-.recalc-btn small { font-size: 8px; font-weight: bold; }
 
 @keyframes pulse-ring { 0% { transform: scale(0.5); opacity: 1; } 100% { transform: scale(1.5); opacity: 0; } }
 .spinning { animation: rotate 0.8s linear infinite; }
@@ -507,6 +489,9 @@ onUnmounted(async () => {
 </style>
 
 <style>
+/* Global Leaflet Overrides (Must be unscoped) */
 .leaflet-div-icon { background: transparent !important; border: none !important; }
 .leaflet-routing-container { display: none !important; }
+/* Force Tooltips to be light */
+.leaflet-tooltip { background: white !important; color: black !important; border: none !important; box-shadow: 0 2px 8px rgba(0,0,0,0.2) !important; font-weight: bold; }
 </style>
